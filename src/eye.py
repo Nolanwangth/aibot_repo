@@ -77,4 +77,10 @@ def describe(image_b64: str, query: str, model: str = "qwen3.5:2b") -> str:
 
 def show_photo(path: str) -> None:
     """Open photo with system viewer so user can see what was captured."""
-    subprocess.Popen(["open", path])
+    import platform
+    if platform.system() == "Darwin":
+        subprocess.Popen(["open", path])
+    elif platform.system() == "Windows":
+        os.startfile(path)
+    else:
+        subprocess.Popen(["xdg-open", path])
