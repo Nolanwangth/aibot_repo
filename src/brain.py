@@ -189,7 +189,8 @@ def _load_short_term() -> list[dict]:
     if os.path.exists(SHORT_TERM_FILE):
         with _memory_lock:
             with open(SHORT_TERM_FILE) as f:
-                return json.load(f)
+                data = json.load(f)
+                return data if isinstance(data, list) else []
     return []
 
 
@@ -216,15 +217,19 @@ def _save(path: str, data) -> None:
 
 
 def _load_facts() -> list:
-    return _load(FACTS_FILE, [])
+    data = _load(FACTS_FILE, [])
+    return data if isinstance(data, list) else []
 
 
 def _load_episodes() -> list:
-    return _load(EPISODES_FILE, [])
+    data = _load(EPISODES_FILE, [])
+    return data if isinstance(data, list) else []
 
 
 def _load_state() -> dict:
     state = _load(STATE_FILE, {})
+    if not isinstance(state, dict):
+        return {}
     if state.get("mood") and state["mood"] not in ALLOWED_MOODS:
         state = {k: v for k, v in state.items() if k != "mood"}
     return state
@@ -420,6 +425,8 @@ def chat_stream(user_text: str):
         **_chat_kwargs(DEEPSEEK_MODEL, 0.9, 1000),
     )
     for chunk in stream:
+        if not getattr(chunk, "choices", None):
+            continue
         delta = chunk.choices[0].delta
         if delta.content:
             yield delta.content

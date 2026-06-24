@@ -357,7 +357,7 @@ MX, MY = 12, 15
 def _render_calm(grid, t):
     col = BLUE
     _draw_eyes_horizontal(grid, LX, LY, RX, RY, col, length=3)
-    _draw_mouth_smile(grid, MX, MY, col, width=3)
+    _draw_mouth_line(grid, MX, MY, col, length=4)
     # Subtle glow in eyes
     phase = t * 6.28
     glow = int(abs(phase) * 40)

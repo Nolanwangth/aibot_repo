@@ -4,6 +4,7 @@ import threading
 import time
 import re
 import json
+import traceback
 
 from .ear import listen_vad, transcribe
 from .brain import chat_stream, generate_vision_query, chat_with_vision
@@ -40,6 +41,7 @@ def _stream_chat_to_tts(text: str):
     full_reply = ""
     header_buffer = ""
     header_done = False
+    mood_seen = False
 
     # Set face to thinking initially
     _face.set_state("thinking")
@@ -53,7 +55,10 @@ def _stream_chat_to_tts(text: str):
                 first_line, rest = header_buffer.split("\n", 1)
                 try:
                     data = json.loads(first_line.strip())
-                    _mood.apply_mood(data.get("mood", ""))
+                    mood = data.get("mood", "")
+                    if _mood.apply_mood(mood):
+                        mood_seen = True
+                        print(f"\n🎭 表情: {mood}")
                     buffer += rest.lstrip()
                     if rest:
                         sys.stdout.write(rest.lstrip())
@@ -111,18 +116,18 @@ def _stream_chat_to_tts(text: str):
     save_memory(text, clean_reply)
 
     # Fallback: infer mood from content if no mood tag was found
-    if _mood.current_mood == "calm":
+    if not mood_seen:
         # First try user's input tone
         hint = _mood.hint_from_user(text)
         if hint:
-            _mood.current_mood = hint
-            _face.set_mood(hint)
+            _mood.apply_mood(hint)
+            print(f"🎭 表情: {hint}（关键词推断）")
         else:
             # Then try LLM reply content
             hint = _mood.hint_from_reply(clean_reply)
             if hint:
-                _mood.current_mood = hint
-                _face.set_mood(hint)
+                _mood.apply_mood(hint)
+                print(f"🎭 表情: {hint}（内容推断）")
 
 
 def _handle_chat(text: str):
@@ -167,16 +172,17 @@ def _process(text: str) -> None:
             _handle_chat(text)
     except Exception as e:
         print(f"❌ 出错了: {e}")
+        traceback.print_exc()
 
 
 def _listen_loop():
     while _running:
         if not _listening:
-            _face.set_state("idle", mood="calm")
+            _face.set_state("idle")
             time.sleep(0.1)
             continue
 
-        _face.set_state("idle", mood="calm")
+        _face.set_state("idle")
         audio = listen_vad()
         if audio is None:
             continue
@@ -186,7 +192,7 @@ def _listen_loop():
             stop_playback()
             print("\n⏸️  语音打断")
 
-        _face.set_state("listening", mood="calm")
+        _face.set_state("listening")
         print("📝 转写中...")
         text = transcribe(audio)
         if not text.strip():
@@ -208,7 +214,7 @@ def main():
             print("🎙️  语音监听：开")
         else:
             stop_playback()
-            _face.set_state("idle", mood="calm")
+            _face.set_state("idle")
             print("🔇 语音监听：关（按空格开启）")
 
     def quit_app(_event=None):

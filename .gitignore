@@ -7,3 +7,4 @@ __pycache__/
 data/memory/
 data/photos/
 .DS_Store
+face_preview_*.png

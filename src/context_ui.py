@@ -56,9 +56,14 @@ def _read_json(path: Path, default):
     if not path.exists():
         return default
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return default
+    if isinstance(default, list):
+        return data if isinstance(data, list) else default
+    if isinstance(default, dict):
+        return data if isinstance(data, dict) else default
+    return data
 
 
 def _runtime_soul() -> str:
@@ -75,6 +80,17 @@ def _state() -> dict:
 def _write_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _json_default_for(key: str):
+    return [] if key in {"conversation", "facts", "episodes"} else {}
+
+
+def _normalize_json_for(key: str, data):
+    default = _json_default_for(key)
+    if isinstance(default, list):
+        return data if isinstance(data, list) else default
+    return data if isinstance(data, dict) else default
 
 
 def build_memory_markdown() -> str:
@@ -188,8 +204,11 @@ INDEX_HTML = r"""<!doctype html>
     textarea { width:100%; min-height:calc(100vh - 190px); resize:vertical; border:1px solid var(--line); border-radius:8px; padding:12px; color:var(--text); background:#0f1117; font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; }
     pre { white-space:pre-wrap; word-break:break-word; margin:0; font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; color:#d8dee9; }
     .msg { border:1px solid var(--line); border-radius:8px; padding:10px; margin-bottom:8px; background:#151821; }
+    .msgHead { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:6px; }
+    .mini { padding:2px 6px; font-size:11px; border-radius:5px; }
     .badge { display:inline-block; font-size:11px; color:#0b1020; background:var(--accent); padding:1px 6px; border-radius:999px; margin-right:6px; }
-    .status { min-height:18px; color:var(--ok); }
+    .status { min-height:18px; color:var(--ok); font-weight:600; }
+    .status.err { color:#ff7b72; }
     .grid { display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap:8px; }
     .stat { background:#151821; border:1px solid var(--line); border-radius:7px; padding:8px; }
   </style>
@@ -211,7 +230,7 @@ INDEX_HTML = r"""<!doctype html>
             <div class="title" id="editorTitle"></div>
             <div class="muted" id="editorHint"></div>
           </div>
-          <button onclick="saveCurrent()">保存</button>
+          <button onclick="saveCurrent()">保存 Ctrl+S</button>
         </div>
         <textarea id="editor"></textarea>
         <div class="status" id="status"></div>
@@ -281,14 +300,23 @@ function renderEditor() {
 }
 
 async function saveCurrent() {
-  const [kind, key] = current.split(':');
-  const body = {kind, key};
-  if (kind === 'text') body.content = el('editor').value;
-  else body.data = JSON.parse(el('editor').value || 'null');
-  data = await api('/api/save', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
-  renderStats();
-  renderContext();
-  setStatus('已保存 ' + key);
+  try {
+    const [kind, key] = current.split(':');
+    const body = {kind, key};
+    if (kind === 'text') body.content = el('editor').value;
+    else {
+      const raw = el('editor').value.trim();
+      if (!raw) body.data = ['conversation', 'facts', 'episodes'].includes(key) ? [] : {};
+      else body.data = JSON.parse(raw);
+    }
+    data = await api('/api/save', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+    renderStats();
+    renderContext();
+    renderEditor();
+    setStatus('已保存 ' + key);
+  } catch (err) {
+    setStatus('保存失败：' + err.message, true);
+  }
 }
 
 async function refreshMemory() {
@@ -307,8 +335,27 @@ function renderStats() {
 
 function renderContext() {
   el('context').innerHTML = data.context.map((m, i) =>
-    `<div class="msg"><span class="badge">${i+1}</span><span class="muted">${m.role}${m.name ? ' · ' + m.name : ''}</span><pre>${escapeHtml(m.content || '')}</pre></div>`
+    `<div class="msg">
+      <div class="msgHead">
+        <div><span class="badge">${i+1}</span><span class="muted">${m.role}${m.name ? ' · ' + m.name : ''}</span></div>
+        ${sourceTabButton(m.name)}
+      </div>
+      <pre>${escapeHtml(m.content || '')}</pre>
+    </div>`
   ).join('');
+}
+
+function sourceTabButton(name) {
+  const map = {
+    'soul.md': 'text:soul',
+    'user.md': 'text:user',
+    'memory.md': 'text:memory',
+    'state mood': 'json:state',
+    'facts.json': 'json:facts',
+    'episodes.json': 'json:episodes'
+  };
+  if (!map[name]) return '';
+  return `<button class="mini" onclick="selectTab('${map[name]}')">编辑来源</button>`;
 }
 
 async function copyContext() {
@@ -316,8 +363,9 @@ async function copyContext() {
   setStatus('上下文已复制');
 }
 
-function setStatus(text) {
+function setStatus(text, isError=false) {
   el('status').textContent = text;
+  el('status').className = isError ? 'status err' : 'status';
   setTimeout(() => { if (el('status').textContent === text) el('status').textContent = ''; }, 2500);
 }
 
@@ -325,7 +373,14 @@ function escapeHtml(s) {
   return s.replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 }
 
-loadAll().catch(err => setStatus('错误：' + err.message));
+document.addEventListener('keydown', (event) => {
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
+    event.preventDefault();
+    saveCurrent();
+  }
+});
+
+loadAll().catch(err => setStatus('错误：' + err.message, true));
 </script>
 </body>
 </html>"""
@@ -373,7 +428,7 @@ class ContextHandler(BaseHTTPRequestHandler):
                 if kind == "text" and key in TEXT_FILES:
                     _write_text(TEXT_FILES[key], body.get("content", ""))
                 elif kind == "json" and key in JSON_FILES:
-                    _write_json(JSON_FILES[key], body.get("data"))
+                    _write_json(JSON_FILES[key], _normalize_json_for(key, body.get("data")))
                 else:
                     self._send_json({"error": "invalid target"}, 400)
                     return
