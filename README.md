@@ -12,11 +12,8 @@
 # 1. 一键搭建环境（仅首次）
 bash setup.sh
 
-# 2. 配置 API Key（仅首次，.env 不会被提交到 Git）
-echo "DEEPSEEK_API_KEY=sk-你的key" > .env
-
-# 3. 启动
-source venv/bin/activate && export $(cat .env | xargs) && python -m src.main
+# 2. 启动
+./run.sh
 ```
 
 启动后**直接说话即可**，说完自动识别。小灵说话时直接开口就能打断她。

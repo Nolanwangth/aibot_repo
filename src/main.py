@@ -1,16 +1,19 @@
-"""Main orchestration — always-on VAD listening + vision + animated face."""
+"""Main orchestration — always-on VAD listening + vision + animated pixel-art face."""
 import sys
 import threading
 import time
+import re
+import json
 
 from .ear import listen_vad, transcribe
 from .brain import chat_stream, generate_vision_query, chat_with_vision
-from .brain import _save_turn as save_memory
+from .brain import _save_turn as save_memory, MoodEngine
 from .eye import capture, describe, show_photo
-from .mouth import say, stop_playback, is_playing
+from .mouth import say_stream, stop_playback, is_playing
 from .face import Face
 
 _face = Face()
+_mood = MoodEngine()
 _listening = True
 _running = True
 
@@ -18,35 +21,116 @@ VISION_TRIGGERS = ["看看", "看", "穿", "拍", "照片", "摄像头", "镜头
                    "自拍", "帅", "美", "穿搭", "衣服", "打扮", "发型", "妆",
                    "这是什么", "那是", "这个", "那个", "面前", "周围", "桌上"]
 
+# Sentence-splitting pattern for streaming TTS
+_SENTENCE_SPLIT = re.compile(r'([。！？\n])')
+
 
 def _is_vision_request(text: str) -> bool:
     return any(kw in text for kw in VISION_TRIGGERS)
 
 
-def _handle_chat(text: str):
-    _face.set_state("thinking")
+def _stream_chat_to_tts(text: str):
+    """Accumulate LLM tokens, split at sentence boundaries,
+    clean mood tags, and feed sentences to streaming TTS."""
+    _face.set_state("thinking", mood="thinking")
     sys.stdout.write("\n💬 小灵: ")
     sys.stdout.flush()
 
-    chunks = []
+    buffer = ""
+    full_reply = ""
+    header_buffer = ""
+    header_done = False
+
+    # Set face to thinking initially
+    _face.set_state("thinking")
+
     for token in chat_stream(text):
+        full_reply += token
+
+        if not header_done:
+            header_buffer += token
+            if "\n" in header_buffer:
+                first_line, rest = header_buffer.split("\n", 1)
+                try:
+                    data = json.loads(first_line.strip())
+                    _mood.apply_mood(data.get("mood", ""))
+                    buffer += rest.lstrip()
+                    if rest:
+                        sys.stdout.write(rest.lstrip())
+                        sys.stdout.flush()
+                except json.JSONDecodeError:
+                    clean = _mood.parse_llm_output(header_buffer)
+                    buffer += clean
+                    sys.stdout.write(clean)
+                    sys.stdout.flush()
+                header_done = True
+            elif len(header_buffer) > 120:
+                clean = _mood.parse_llm_output(header_buffer)
+                buffer += clean
+                sys.stdout.write(clean)
+                sys.stdout.flush()
+                header_done = True
+            continue
+
         sys.stdout.write(token)
         sys.stdout.flush()
-        chunks.append(token)
+        buffer += token
 
-    reply = "".join(chunks)
+        # Check for sentence boundary
+        parts = _SENTENCE_SPLIT.split(buffer)
+        if len(parts) >= 3:
+            # We have at least one complete sentence
+            sentence = parts[0] + parts[1]  # text + punctuation
+            remaining = "".join(parts[2:])
+
+            # Clean mood tag if any, speak the sentence
+            clean = _mood.parse_llm_output(sentence)
+            if clean.strip():
+                _face.set_state("speaking")
+                say_stream(clean)
+
+            buffer = remaining
+
+    # Flush remaining buffer
+    if not header_done and header_buffer.strip():
+        clean = _mood.parse_llm_output(header_buffer)
+        buffer += clean
+        sys.stdout.write(clean)
+        sys.stdout.flush()
+
+    if buffer.strip():
+        clean = _mood.parse_llm_output(buffer)
+        if clean.strip():
+            _face.set_state("speaking")
+            say_stream(clean)
+
     print()
-    save_memory(text, reply)
 
-    if not reply.strip():
-        return
+    # Save full turn (without mood tags) to memory
+    clean_reply = _mood.parse_llm_output(full_reply)
+    save_memory(text, clean_reply)
 
-    _face.set_state("speaking")
-    say(reply)  # non-blocking, runs in background thread
+    # Fallback: infer mood from content if no mood tag was found
+    if _mood.current_mood == "calm":
+        # First try user's input tone
+        hint = _mood.hint_from_user(text)
+        if hint:
+            _mood.current_mood = hint
+            _face.set_mood(hint)
+        else:
+            # Then try LLM reply content
+            hint = _mood.hint_from_reply(clean_reply)
+            if hint:
+                _mood.current_mood = hint
+                _face.set_mood(hint)
+
+
+def _handle_chat(text: str):
+    _stream_chat_to_tts(text)
 
 
 def _handle_vision(text: str):
-    print("👁️  视觉模式启动...")
+    print("\n👁️  视觉模式启动...")
     print("🔍 分析意图中...")
     vision_query = generate_vision_query(text)
     print(f"   查询: {vision_query}")
@@ -60,15 +144,18 @@ def _handle_vision(text: str):
     description = describe(image_b64, vision_query)
     print(f"   画面: {description[:80]}...")
 
-    _face.set_state("thinking")
+    _face.set_state("thinking", mood="thinking")
     reply = chat_with_vision(text, description)
-    print(f"💬 小灵: {reply}")
+    clean = _mood.parse_llm_output(reply)
+    print(f"💬 小灵: {clean}")
 
-    if not reply.strip():
+    if not clean.strip():
         return
 
     _face.set_state("speaking")
-    say(reply)
+    say_stream(clean)
+
+    save_memory(text, clean)
 
 
 def _process(text: str) -> None:
@@ -85,11 +172,11 @@ def _process(text: str) -> None:
 def _listen_loop():
     while _running:
         if not _listening:
-            _face.set_state("idle")
+            _face.set_state("idle", mood="calm")
             time.sleep(0.1)
             continue
 
-        _face.set_state("idle")
+        _face.set_state("idle", mood="calm")
         audio = listen_vad()
         if audio is None:
             continue
@@ -99,7 +186,7 @@ def _listen_loop():
             stop_playback()
             print("\n⏸️  语音打断")
 
-        _face.set_state("listening")
+        _face.set_state("listening", mood="calm")
         print("📝 转写中...")
         text = transcribe(audio)
         if not text.strip():
@@ -112,6 +199,7 @@ def _listen_loop():
 
 def main():
     _face.setup()
+    _mood.bind_face(_face)
 
     def toggle_listening(_event=None):
         global _listening
@@ -120,7 +208,7 @@ def main():
             print("🎙️  语音监听：开")
         else:
             stop_playback()
-            _face.set_state("idle")
+            _face.set_state("idle", mood="calm")
             print("🔇 语音监听：关（按空格开启）")
 
     def quit_app(_event=None):
@@ -137,7 +225,7 @@ def main():
     threading.Thread(target=_listen_loop, daemon=True).start()
 
     print("=" * 50)
-    print("🤖 小灵 — AI 桌面陪伴精灵")
+    print("🤖 小灵 — AI 桌面陪伴精灵 v0.4.0")
     print("=" * 50)
     print("直接说话即可，说完自动识别")
     print("小灵说话时直接开口就能打断她")

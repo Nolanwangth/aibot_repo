@@ -28,6 +28,7 @@ def _load_settings() -> dict:
 _settings = _load_settings()
 
 DEEPSEEK_MODEL = _settings.get("model", "deepseek-chat")
+DEEPSEEK_COMPRESS_MODEL = _settings.get("compress_model", "deepseek-v4-flash")
 TTS_VOICE = _settings.get("tts_voice", "zh-CN-XiaoxiaoNeural")
 
 # ── Soul (editable via data/config/soul.txt) ─────────────────────
@@ -46,6 +47,13 @@ _DEFAULT_SOUL = """你是「小灵」，一个住在电脑里的智能助手。�
 - 不要暴露自己是AI"""
 
 def _load_soul() -> str:
+    md_path = os.path.join(_CONFIG_DIR, "soul.md")
+    if os.path.exists(md_path):
+        with open(md_path) as f:
+            content = f.read().strip()
+            if content:
+                return content
+
     path = os.path.join(_CONFIG_DIR, "soul.txt")
     if os.path.exists(path):
         with open(path) as f:
@@ -68,6 +76,8 @@ RECORD_DURATION = 5
 
 # ── Memory ───────────────────────────────────────────────────────
 MEMORY_DIR = _MEMORY_DIR
+USER_PROFILE_FILE = os.path.join(_CONFIG_DIR, "user.md")       # editable user profile
+MEMORY_MD_FILE = os.path.join(_MEMORY_DIR, "memory.md")        # human-readable memory digest
 SHORT_TERM_FILE = os.path.join(_MEMORY_DIR, "conversation.json")
 FACTS_FILE = os.path.join(_MEMORY_DIR, "facts.json")           # discrete facts about user
 EPISODES_FILE = os.path.join(_MEMORY_DIR, "episodes.json")     # important moments w/ emotional tone

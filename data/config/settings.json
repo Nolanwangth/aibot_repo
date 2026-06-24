@@ -1,4 +1,5 @@
 {
   "model": "deepseek-v4-pro",
+  "compress_model": "deepseek-v4-flash",
   "tts_voice": "zh-CN-XiaoxiaoNeural"
 }
