@@ -8,14 +8,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from . import memory_manager as mem
+
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = ROOT / "data" / "config"
 MEMORY_DIR = ROOT / "data" / "memory"
 
 TEXT_FILES = {
-    "soul": CONFIG_DIR / "soul.md",
+    "soul": CONFIG_DIR / "soul.txt",
     "user": CONFIG_DIR / "user.md",
     "memory": MEMORY_DIR / "memory.md",
+    "reflection": MEMORY_DIR / "reflection.md",
 }
 
 JSON_FILES = {
@@ -24,6 +27,9 @@ JSON_FILES = {
     "facts": MEMORY_DIR / "facts.json",
     "episodes": MEMORY_DIR / "episodes.json",
     "state": MEMORY_DIR / "state.json",
+    "memory_candidates": MEMORY_DIR / "memory_candidates.json",
+    "memory_stream": MEMORY_DIR / "memory_stream.jsonl",
+    "working_memory": MEMORY_DIR / "working_memory.json",
 }
 
 MOODS = [
@@ -120,7 +126,7 @@ def assemble_context() -> list[dict[str, str]]:
     soul = _runtime_soul()
 
     messages = [
-        {"role": "system", "name": "soul.md", "content": soul},
+        {"role": "system", "name": "soul.txt", "content": soul},
         {
             "role": "system",
             "name": "mood protocol",
@@ -132,10 +138,15 @@ def assemble_context() -> list[dict[str, str]]:
     if user_profile:
         messages.append({"role": "system", "name": "user.md", "content": "【用户画像 user.md】\n" + user_profile})
 
-    memory_md = _read_text(TEXT_FILES["memory"]).strip()
+    wm_summary = mem.working_memory_summary()
+    if wm_summary:
+        messages.append({"role": "system", "name": "working_memory", "content": "【当前工作状态】\n" + wm_summary})
+
+    memory_md = mem.load_memory_md()
     if memory_md:
         messages.append({"role": "system", "name": "memory.md", "content": "【长期记忆 memory.md】\n" + memory_md})
     else:
+        # Fallback to legacy
         facts = _read_json(JSON_FILES["facts"], [])
         episodes = _read_json(JSON_FILES["episodes"], [])
         if facts:
@@ -157,7 +168,7 @@ def assemble_context() -> list[dict[str, str]]:
 
 def snapshot() -> dict:
     text = {key: _read_text(path) for key, path in TEXT_FILES.items()}
-    data = {key: _read_json(path, [] if key in {"conversation", "facts", "episodes"} else {}) for key, path in JSON_FILES.items()}
+    data = {key: _read_json(path, [] if key in {"conversation", "facts", "episodes", "memory_candidates", "memory_stream"} else {}) for key, path in JSON_FILES.items()}
     context = assemble_context()
     return {
         "text": text,
@@ -169,7 +180,10 @@ def snapshot() -> dict:
             "short_term_messages": len(data["conversation"]),
             "facts": len(data["facts"]),
             "episodes": len(data["episodes"]),
+            "memory_stream": len(mem.load_stream()),
+            "candidates_pending": sum(1 for c in mem.load_candidates("pending")),
         },
+        "memory_stats": mem.get_stats(),
     }
 
 
@@ -213,7 +227,10 @@ INDEX_HTML = r"""<!doctype html>
   <header>
     <h1>小灵 Context Console</h1>
     <div>
-      <button onclick="refreshMemory()">刷新 memory.md</button>
+      <button onclick="refreshMemory()" title="从 facts/episodes 生成 memory.md">刷新 memory.md</button>
+      <button onclick="refreshMemoryStream()" title="从记忆流+反思+工作状态生成 memory.md">刷新记忆流</button>
+      <button onclick="refreshReflection()" title="根据记忆流和最近对话重新生成反思">刷新反思</button>
+      <button onclick="approveAll()" title="批准所有待审批候选">全部批准</button>
       <button onclick="loadAll()">重新读取</button>
     </div>
   </header>
@@ -232,10 +249,18 @@ INDEX_HTML = r"""<!doctype html>
         <div class="status" id="status"></div>
       </div>
     </main>
-    <aside>
+  <aside>
       <div class="panel">
         <div class="row"><div class="title">上下文统计</div></div>
         <div class="grid" id="stats"></div>
+      </div>
+      <div class="panel">
+        <div class="row"><div class="title">记忆系统</div></div>
+        <div class="grid" id="memStats"></div>
+      </div>
+      <div class="panel" id="candidatesPanel">
+        <div class="row"><div class="title">待审批候选</div><button onclick="loadAll()">刷新</button></div>
+        <div id="candidatesList"><span class="muted">加载中...</span></div>
       </div>
       <div class="panel">
         <div class="row"><div class="title">实际注入上下文</div><button onclick="copyContext()">复制</button></div>
@@ -245,13 +270,16 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 <script>
 const tabs = [
-  ["text:soul", "soul.md", "人格、输出协议、说话风格"],
+  ["text:soul", "soul.txt", "人格、输出协议、说话风格"],
   ["text:user", "user.md", "用户画像和长期偏好"],
   ["text:memory", "memory.md", "自动生成的长期记忆摘要"],
+  ["text:reflection", "reflection.md", "阶段性反思和建议"],
+  ["json:working_memory", "working_memory.json", "当前工作状态"],
   ["json:state", "state.json", "关系状态和最近互动基调"],
-  ["json:facts", "facts.json", "离散长期事实"],
-  ["json:episodes", "episodes.json", "重要互动片段"],
+  ["json:facts", "facts.json", "离散长期事实（兼容）"],
+  ["json:episodes", "episodes.json", "重要互动片段（兼容）"],
   ["json:conversation", "conversation.json", "短期逐字对话"],
+  ["json:memory_candidates", "memory_candidates.json", "待审批记忆候选"],
   ["json:settings", "settings.json", "模型和语音配置"]
 ];
 let data = null;
@@ -270,6 +298,8 @@ async function loadAll() {
   renderNav();
   renderEditor();
   renderStats();
+  renderMemStats();
+  renderCandidates();
   renderContext();
   setStatus('已读取最新上下文');
 }
@@ -307,6 +337,8 @@ async function saveCurrent() {
     }
     data = await api('/api/save', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
     renderStats();
+    renderMemStats();
+    renderCandidates();
     renderContext();
     renderEditor();
     setStatus('已保存 ' + key);
@@ -321,12 +353,82 @@ async function refreshMemory() {
   renderNav();
   renderEditor();
   renderStats();
+  renderMemStats();
+  renderCandidates();
   renderContext();
-  setStatus('已从 facts/episodes/state 重新生成 memory.md');
+  setStatus('已从 facts/episodes 重新生成 memory.md');
 }
 
 function renderStats() {
   el('stats').innerHTML = Object.entries(data.stats).map(([k,v]) => `<div class="stat"><div class="muted">${k}</div><div>${v}</div></div>`).join('');
+}
+
+function renderMemStats() {
+  const ms = data.memory_stats || {};
+  const items = [
+    ['记忆流', ms.memory_stream_total || 0],
+    ['待审批', ms.candidates_pending || 0],
+    ['已批准', ms.candidates_approved || 0],
+    ['已拒绝', ms.candidates_rejected || 0],
+  ];
+  el('memStats').innerHTML = items.map(([k,v]) =>
+    `<div class="stat"><div class="muted">${k}</div><div>${v}</div></div>`
+  ).join('');
+}
+
+function renderCandidates() {
+  const candidates = (data.json.memory_candidates || {candidates:[]}).candidates;
+  const pending = candidates.filter(c => c.status === 'pending');
+  if (!pending.length) {
+    el('candidatesList').innerHTML = '<span class="muted">暂无待审批候选</span>';
+    return;
+  }
+  el('candidatesList').innerHTML = pending.map(c =>
+    `<div class="msg" style="margin-bottom:6px">
+      <div class="msgHead">
+        <span><span class="badge">${c.type}</span> <span class="muted">重要性:${c.importance}</span></span>
+        <span>
+          <button class="mini" onclick="approveCandidate('${c.id}')" style="color:#56d364">✓ 批准</button>
+          <button class="mini" onclick="rejectCandidate('${c.id}')" style="color:#ff7b72">✗ 拒绝</button>
+        </span>
+      </div>
+      <pre>${escapeHtml(c.content)}</pre>
+      <div class="muted" style="font-size:11px;margin-top:4px">${escapeHtml(c.reason)}</div>
+    </div>`
+  ).join('');
+}
+
+async function approveCandidate(id) {
+  data = await api('/api/approve-candidate', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({candidate_id:id})});
+  renderStats(); renderMemStats(); renderCandidates(); renderContext();
+  setStatus('已批准记忆');
+}
+
+async function rejectCandidate(id) {
+  data = await api('/api/reject-candidate', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({candidate_id:id})});
+  renderMemStats(); renderCandidates();
+  setStatus('已拒绝记忆');
+}
+
+async function approveAll() {
+  data = await api('/api/approve-all', {method:'POST'});
+  current = 'text:memory';
+  renderNav(); renderEditor(); renderStats(); renderMemStats(); renderCandidates(); renderContext();
+  setStatus('已全部批准');
+}
+
+async function refreshMemoryStream() {
+  data = await api('/api/refresh-memory-stream', {method:'POST'});
+  current = 'text:memory';
+  renderNav(); renderEditor(); renderStats(); renderMemStats(); renderCandidates(); renderContext();
+  setStatus('已从记忆流重新生成 memory.md');
+}
+
+async function refreshReflection() {
+  data = await api('/api/refresh-reflection', {method:'POST'});
+  current = 'text:reflection';
+  renderNav(); renderEditor(); renderStats(); renderMemStats(); renderContext();
+  setStatus('已重新生成反思');
 }
 
 function renderContext() {
@@ -343,9 +445,11 @@ function renderContext() {
 
 function sourceTabButton(name) {
   const map = {
-    'soul.md': 'text:soul',
+    'soul.txt': 'text:soul',
     'user.md': 'text:user',
     'memory.md': 'text:memory',
+    'reflection.md': 'text:reflection',
+    'working_memory': 'json:working_memory',
     'state mood': 'json:state',
     'facts.json': 'json:facts',
     'episodes.json': 'json:episodes'
@@ -432,6 +536,35 @@ class ContextHandler(BaseHTTPRequestHandler):
             elif path == "/api/refresh-memory":
                 refresh_memory_markdown()
                 self._send_json(snapshot())
+            elif path == "/api/refresh-memory-stream":
+                mem.refresh_memory_md()
+                self._send_json(snapshot())
+            elif path == "/api/refresh-reflection":
+                conversation = _read_json(JSON_FILES["conversation"], [])
+                mem.refresh_reflection(conversation)
+                self._send_json(snapshot())
+            elif path == "/api/approve-candidate":
+                body = self._read_body()
+                cid = body.get("candidate_id", "")
+                if not cid:
+                    self._send_json({"error": "missing candidate_id"}, 400)
+                    return
+                mem.approve_candidate(cid)
+                self._send_json(snapshot())
+            elif path == "/api/reject-candidate":
+                body = self._read_body()
+                cid = body.get("candidate_id", "")
+                if not cid:
+                    self._send_json({"error": "missing candidate_id"}, 400)
+                    return
+                mem.reject_candidate(cid)
+                self._send_json(snapshot())
+            elif path == "/api/approve-all":
+                for c in mem.load_candidates("pending"):
+                    mem.approve_candidate(c["id"])
+                self._send_json(snapshot())
+            elif path == "/api/memory-stats":
+                self._send_json(mem.get_stats())
             else:
                 self._send_json({"error": "not found"}, 404)
         except Exception as exc:

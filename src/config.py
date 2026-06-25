@@ -79,9 +79,18 @@ MEMORY_DIR = _MEMORY_DIR
 USER_PROFILE_FILE = os.path.join(_CONFIG_DIR, "user.md")       # editable user profile
 MEMORY_MD_FILE = os.path.join(_MEMORY_DIR, "memory.md")        # human-readable memory digest
 SHORT_TERM_FILE = os.path.join(_MEMORY_DIR, "conversation.json")
-FACTS_FILE = os.path.join(_MEMORY_DIR, "facts.json")           # discrete facts about user
-EPISODES_FILE = os.path.join(_MEMORY_DIR, "episodes.json")     # important moments w/ emotional tone
+FACTS_FILE = os.path.join(_MEMORY_DIR, "facts.json")           # (legacy) discrete facts about user
+EPISODES_FILE = os.path.join(_MEMORY_DIR, "episodes.json")     # (legacy) important moments
 STATE_FILE = os.path.join(_MEMORY_DIR, "state.json")           # relationship stage + mood
+
+# New memory system paths
+MEMORY_STREAM_FILE = os.path.join(_MEMORY_DIR, "memory_stream.jsonl")       # append-only memory stream
+MEMORY_CANDIDATES_FILE = os.path.join(_MEMORY_DIR, "memory_candidates.json") # pending candidates
+WORKING_MEMORY_FILE = os.path.join(_MEMORY_DIR, "working_memory.json")      # current state
+REFLECTION_FILE = os.path.join(_MEMORY_DIR, "reflection.md")                # periodic reflection
+
 SHORT_TERM_TURNS = 5          # turns kept verbatim in context
-MAX_FACTS = 20                # prune least important when exceeded
-MAX_EPISODES = 15             # prune by importance × recency when exceeded
+MAX_FACTS = 20                # prune least important when exceeded (legacy)
+MAX_EPISODES = 15             # prune by importance × recency when exceeded (legacy)
+MAX_MEMORY_STREAM = 200       # max items in memory stream before pruning low-importance
+MAX_CANDIDATES = 30           # max pending candidates

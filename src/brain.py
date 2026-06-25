@@ -1,8 +1,10 @@
 """LLM brain — DeepSeek chat with personality + layered memory + MoodEngine."""
 import json
 import os
+import random
 import re
 import threading
+import time
 from openai import OpenAI
 
 from .config import (
@@ -21,6 +23,7 @@ from .config import (
     MAX_FACTS,
     MAX_EPISODES,
 )
+from . import memory_manager as mem
 from .moods import MOODS
 
 _client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
@@ -49,22 +52,34 @@ mood 必须从这里选一个：{moods}
 第二行开始直接输出要说的话。不要输出 face 字段。不要用 [mood:xxx] 标签。
 回答要适合边显示边朗读：中文自然、短句优先、2-4 句话。"""
 
-_COMPRESS_PROMPT = """根据对话片段提取记忆。已有事实供参考（避免重复）：
+_COMPRESS_PROMPT = """根据对话片段提取值得记住的信息，生成记忆候选。已有记忆供参考（避免重复）：
 {existing_facts}
 
 对话片段：
 {new_turns}
 
 严格输出 JSON（不要 markdown 包裹）：
-{{"facts": ["一句话长期事实"], "episodes": ["重要片段概括"], "mood": "固定mood或空字符串"}}
+{{"candidates": [
+  {{"type": "fact", "content": "一句话长期事实", "importance": 7, "reason": "为什么值得记住", "mood": ""}},
+  {{"type": "episode", "content": "重要片段概括", "importance": 6, "reason": "为什么重要", "mood": ""}}
+]}}
 
-- mood 只能从这里选：{moods}
-- facts 只写稳定、可复用、未来有帮助的信息，例如用户身份、偏好、目标、项目、研究方向、明确要求
-- 不要把临时玩笑、角色扮演设定、一次性的夸张说法写入 facts
-- episodes 只写真正重要的互动片段、关系节点或科研工作节点
+可选 type：
+- preference: 用户偏好、习惯、喜好
+- project: 项目信息、进度、技术细节
+- fact: 稳定、可复用的长期事实（用户身份、目标、研究方向、明确要求）
+- correction: 用户纠正过的东西
+- relationship: 关系节点、情感互动
+- episode: 值得记住的互动片段或科研工作节点
+- task: 待办或正在做的任务
+
+规则：
+- importance 1-10，越高越重要
+- reason 简短说明这条为什么值得记住（对后续陪伴和科研协作有用）
+- mood 只在情绪明显相关时写
+- 不要把临时玩笑、角色扮演设定、一次性的夸张说法写入
 - 日常寒暄、重复问候、无长期价值的视觉描述忽略
-- facts 最多 3 条，episodes 最多 1 条
-- mood 只在情绪明显变化时写；无变化写空字符串"""
+- candidates 最多 3 条"""
 
 _memory_lock = threading.Lock()
 _compression_lock = threading.Lock()
@@ -95,12 +110,14 @@ _JSON_HEADER_RE = re.compile(r'^\s*(\{.*?\})(?:\s*\n|$)', re.S)
 
 class MoodEngine:
     """Tracks current mood. Receives mood tags from LLM output and
-    keyword hints from user input."""
+    keyword hints from user input. Forces mood change after 7 same-mood turns."""
 
     def __init__(self):
         self.current_mood = "calm"
         self._face = None
         self._last_assistant_mood = "calm"
+        self._same_mood_count = 0
+        self._max_same_mood = 7
 
     def bind_face(self, face):
         self._face = face
@@ -109,6 +126,18 @@ class MoodEngine:
         mood = (mood or "").strip()
         if mood not in ALLOWED_MOODS:
             return False
+
+        # Force change if same mood used too many consecutive turns
+        if mood == self.current_mood:
+            self._same_mood_count += 1
+            if self._same_mood_count >= self._max_same_mood:
+                # Pick a different mood at random
+                others = [m for m in ALLOWED_MOODS if m != mood]
+                mood = random.choice(others)
+                self._same_mood_count = 0
+        else:
+            self._same_mood_count = 0
+
         self.current_mood = mood
         self._last_assistant_mood = mood
         if self._face:
@@ -180,7 +209,8 @@ class MoodEngine:
         excl = text.count("！")
         if excl >= 2:
             return "excited"
-        return ""
+        # Random fallback — add variety when no strong signal
+        return random.choice(["thinking", "happy", "focused", "calm", "soothing"])
 
 
 # ── Memory IO ────────────────────────────────────────────────────
@@ -283,10 +313,13 @@ def _compress_turns(turns: list[dict]) -> None:
             f"{'用户' if m['role'] == 'user' else '小灵'}: {m.get('content', '')}"
             for m in turns
         )
+        # Use existing memory stream contents as reference (avoid duplication)
+        existing = mem.load_stream(limit=10, min_importance=6)
+        existing_text = json.dumps([e["content"] for e in existing], ensure_ascii=False) if existing else "（暂无）"
+
         prompt = _COMPRESS_PROMPT.format(
-            existing_facts=json.dumps(_load_facts(), ensure_ascii=False) or "（暂无）",
+            existing_facts=existing_text,
             new_turns=new_text,
-            moods=" / ".join(ORDERED_MOODS()),
         )
         resp = _client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
@@ -303,32 +336,47 @@ def _compress_turns(turns: list[dict]) -> None:
         except json.JSONDecodeError:
             return
 
-        new_facts = [str(item).strip() for item in data.get("facts", []) if str(item).strip()]
-        if new_facts:
+        candidates_raw = data.get("candidates", [])
+        if not candidates_raw:
+            return
+
+        # Write to candidates instead of directly to facts/episodes
+        for c in candidates_raw:
+            mem.add_candidate(
+                type_=c.get("type", "fact"),
+                content=c.get("content", ""),
+                importance=c.get("importance", 5),
+                reason=c.get("reason", ""),
+                mood=c.get("mood", ""),
+                source_turn_ids=[str(time.time())],  # approximate turn id
+            )
+
+        # Also keep legacy facts/episodes updated for backward compat
+        legacy_facts = [c["content"] for c in candidates_raw
+                        if c.get("type") in ("fact", "preference", "project", "correction")]
+        if legacy_facts:
             facts = _load_facts()
             seen = {str(item).strip() for item in facts}
-            for fact in new_facts:
-                if fact not in seen:
-                    facts.insert(0, fact)
-                    seen.add(fact)
+            for fact in legacy_facts:
+                f = fact.strip()
+                if f and f not in seen:
+                    facts.insert(0, f)
+                    seen.add(f)
             _save(FACTS_FILE, facts[:MAX_FACTS])
 
-        new_episodes = [str(item).strip() for item in data.get("episodes", []) if str(item).strip()]
-        if new_episodes:
+        legacy_episodes = [c["content"] for c in candidates_raw if c.get("type") == "episode"]
+        if legacy_episodes:
             episodes = _load_episodes()
             seen = {str(item).strip() for item in episodes}
-            for episode in new_episodes:
-                if episode not in seen:
-                    episodes.insert(0, episode)
-                    seen.add(episode)
+            for ep in legacy_episodes:
+                e = ep.strip()
+                if e and e not in seen:
+                    episodes.insert(0, e)
+                    seen.add(e)
             _save(EPISODES_FILE, episodes[:MAX_EPISODES])
 
-        mood = str(data.get("mood", "")).strip()
-        if mood in ALLOWED_MOODS:
-            state = _load_state()
-            state["mood"] = mood
-            _save(STATE_FILE, state)
-
+        # Update memory.md from new memory system
+        mem.refresh_memory_md()
         _write_memory_md()
 
 
@@ -346,8 +394,6 @@ def _compress_turns_background(turns: list[dict]) -> None:
 
 def _build_context(extra: str = "") -> list[dict]:
     short_term = _load_short_term()
-    facts = _load_facts()
-    episodes = _load_episodes()
     messages = [
         {"role": "system", "content": _load_runtime_soul()},
         {"role": "system", "content": MOOD_PROTOCOL.format(moods=" / ".join(ORDERED_MOODS()))},
@@ -357,27 +403,21 @@ def _build_context(extra: str = "") -> list[dict]:
     if user_profile:
         messages.append({"role": "system", "content": "【用户画像 user.md】\n" + user_profile})
 
-    memory_md = _load_text(MEMORY_MD_FILE)
+    wm_summary = mem.working_memory_summary()
+    if wm_summary:
+        messages.append({"role": "system", "content": "【当前工作状态 working_memory】\n" + wm_summary})
+
+    memory_md = mem.load_memory_md()
     if memory_md:
         messages.append({"role": "system", "content": "【长期记忆 memory.md】\n" + memory_md})
-
-    if facts and not memory_md:
-        lines = [f"- {f}" for f in facts[:10]]
-        messages.append({"role": "system", "content": "【关于他你知道这些】\n" + "\n".join(lines)})
-
-    if episodes and not memory_md:
-        lines = [f"- {e}" for e in episodes[:5]]
-        messages.append({"role": "system", "content": "【你们之间的事】\n" + "\n".join(lines)})
 
     messages.extend(short_term)
 
     if extra:
         messages.append({"role": "user", "content": extra})
 
-    fc = len(facts)
-    ec = len(episodes)
     tc = len(short_term) // 2
-    print(f"\n📋 上下文: Soul + {fc}事实 + {ec}片段 + {tc}轮对话")
+    print(f"\n📋 上下文: Soul + working_memory + memory.md + {tc}轮对话")
     return messages
 
 
@@ -458,7 +498,7 @@ def chat_with_vision(user_text: str, image_description: str) -> str:
 
 def ORDERED_MOODS() -> list[str]:
     return [
-        "calm", "happy", "thinking", "excited", "confused", "surprised",
-        "focused", "angry", "sad", "afraid", "playful", "lovestruck",
-        "cool", "soothing", "sleepy",
+        "excited", "confused", "surprised", "focused", "angry", "sad",
+        "afraid", "playful", "lovestruck", "cool", "soothing", "sleepy",
+        "calm", "happy", "thinking",
     ]

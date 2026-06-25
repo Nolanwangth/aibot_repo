@@ -42,6 +42,7 @@ def _stream_chat_to_tts(text: str):
     header_buffer = ""
     header_done = False
     mood_seen = False
+    tts_buffer = ""   # accumulates sentences before sending to TTS
 
     # Set face to thinking initially
     _face.set_state("thinking")
@@ -84,16 +85,16 @@ def _stream_chat_to_tts(text: str):
         # Check for sentence boundary
         parts = _SENTENCE_SPLIT.split(buffer)
         if len(parts) >= 3:
-            # We have at least one complete sentence
-            sentence = parts[0] + parts[1]  # text + punctuation
+            sentence = parts[0] + parts[1]
             remaining = "".join(parts[2:])
-
-            # Clean mood tag if any, speak the sentence
             clean = _mood.parse_llm_output(sentence)
             if clean.strip():
-                _face.set_state("speaking")
-                say_stream(clean)
-
+                # Buffer until we have enough text (2+ sentences or 40+ chars)
+                tts_buffer += clean
+                if tts_buffer.count("。") + tts_buffer.count("！") + tts_buffer.count("？") >= 2 or len(tts_buffer) >= 40:
+                    _face.set_state("speaking")
+                    say_stream(tts_buffer)
+                    tts_buffer = ""
             buffer = remaining
 
     # Flush remaining buffer
@@ -102,6 +103,12 @@ def _stream_chat_to_tts(text: str):
         buffer += clean
         sys.stdout.write(clean)
         sys.stdout.flush()
+
+    # Flush accumulated TTS buffer
+    if tts_buffer.strip():
+        _face.set_state("speaking")
+        say_stream(tts_buffer)
+        tts_buffer = ""
 
     if buffer.strip():
         clean = _mood.parse_llm_output(buffer)
