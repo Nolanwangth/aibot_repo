@@ -353,10 +353,6 @@ def _build_context(extra: str = "") -> list[dict]:
         {"role": "system", "content": MOOD_PROTOCOL.format(moods=" / ".join(ORDERED_MOODS()))},
     ]
 
-    state = _load_state()
-    if state.get("mood"):
-        messages.append({"role": "system", "content": f"【最近互动基调】{state['mood']}"})
-
     user_profile = _load_text(USER_PROFILE_FILE)
     if user_profile:
         messages.append({"role": "system", "content": "【用户画像 user.md】\n" + user_profile})
