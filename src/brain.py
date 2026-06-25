@@ -1,7 +1,6 @@
 """LLM brain — DeepSeek chat with personality + layered memory + MoodEngine."""
 import json
 import os
-import random
 import re
 import threading
 import time
@@ -12,20 +11,17 @@ from .config import (
     DEEPSEEK_BASE_URL,
     DEEPSEEK_MODEL,
     DEEPSEEK_COMPRESS_MODEL,
+    require_deepseek_key,
     SOUL,
     USER_PROFILE_FILE,
-    MEMORY_MD_FILE,
     SHORT_TERM_FILE,
-    FACTS_FILE,
-    EPISODES_FILE,
-    STATE_FILE,
     SHORT_TERM_TURNS,
-    MAX_FACTS,
-    MAX_EPISODES,
 )
 from . import memory_manager as mem
 from .moods import MOODS
 
+# Validate key when brain module loads (not when config loads)
+require_deepseek_key()
 _client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 
 # V4 models default to thinking mode → empty content. Must explicitly disable.
@@ -49,7 +45,7 @@ MOOD_PROTOCOL = """【输出协议】
 {{"mood":"calm"}}
 
 mood 必须从这里选一个：{moods}
-第二行开始直接输出要说的话。不要输出 face 字段。不要用 [mood:xxx] 标签。
+第二行开始直接输出要说的话。
 回答要适合边显示边朗读：中文自然、短句优先、2-4 句话。"""
 
 _COMPRESS_PROMPT = """根据对话片段提取值得记住的信息，生成记忆候选。已有记忆供参考（避免重复）：
@@ -87,6 +83,8 @@ _compression_lock = threading.Lock()
 
 # ── MoodEngine ──────────────────────────────────────────────────
 
+import re
+
 _MOOD_KEYWORDS = {
     "开心": "happy", "高兴": "happy", "哈哈": "happy", "棒": "happy",
     "生气": "angry", "愤怒": "angry",
@@ -109,15 +107,17 @@ _JSON_HEADER_RE = re.compile(r'^\s*(\{.*?\})(?:\s*\n|$)', re.S)
 
 
 class MoodEngine:
-    """Tracks current mood. Receives mood tags from LLM output and
-    keyword hints from user input. Forces mood change after 7 same-mood turns."""
+    """Tracks current mood from LLM output.
+
+    LLM sets mood via first-line JSON: {"mood":"happy"}
+    Fallback: user input / reply content keywords when LLM gives no valid JSON.
+    Face states (idle/listening/thinking/speaking) do NOT change mood.
+    """
 
     def __init__(self):
         self.current_mood = "calm"
         self._face = None
         self._last_assistant_mood = "calm"
-        self._same_mood_count = 0
-        self._max_same_mood = 7
 
     def bind_face(self, face):
         self._face = face
@@ -126,17 +126,6 @@ class MoodEngine:
         mood = (mood or "").strip()
         if mood not in ALLOWED_MOODS:
             return False
-
-        # Force change if same mood used too many consecutive turns
-        if mood == self.current_mood:
-            self._same_mood_count += 1
-            if self._same_mood_count >= self._max_same_mood:
-                # Pick a different mood at random
-                others = [m for m in ALLOWED_MOODS if m != mood]
-                mood = random.choice(others)
-                self._same_mood_count = 0
-        else:
-            self._same_mood_count = 0
 
         self.current_mood = mood
         self._last_assistant_mood = mood
@@ -160,29 +149,29 @@ class MoodEngine:
         return "", body
 
     def parse_llm_output(self, text: str) -> str:
-        """Strip mood metadata, update mood, return cleaned text."""
+        """Strip mood metadata, update mood, return cleaned text.
+        Keeps backward-compat parsing of [mood:xxx] tags."""
         _, text = self.parse_json_header(text)
-        global _MOOD_TAG_RE
-        match = _MOOD_TAG_RE.match(text)  # match at start only
+        # Backward compat: strip any [mood:xxx] still in output
+        match = _MOOD_TAG_RE.match(text)
         if match:
             mood = match.group(1)
             self.apply_mood(mood)
             return _MOOD_TAG_RE.sub("", text, count=1).lstrip()
-        # Fallback: check anywhere in text (backward compat)
         match = _MOOD_TAG_RE.search(text)
         if match:
             self.apply_mood(match.group(1))
         return _MOOD_TAG_RE.sub("", text).strip()
 
     def hint_from_user(self, text: str) -> str:
-        """Optional: detect user's emotional tone to bias assistant mood."""
+        """Detect user's emotional tone as fallback when LLM gives no JSON."""
         for keyword, mood in _MOOD_KEYWORDS.items():
             if keyword in text:
                 return mood
         return ""
 
     def hint_from_reply(self, text: str) -> str:
-        """Analyze assistant's own reply for mood signals (fallback when no tag)."""
+        """Analyze assistant's own reply as fallback when LLM gives no JSON."""
         if any(w in text for w in ["？", "呢", "吧", "吗", "想", "考虑", "maybe"]):
             return "thinking"
         if any(w in text for w in ["！", "太棒", "厉害", "哇", "牛逼", "真好"]):
@@ -205,12 +194,10 @@ class MoodEngine:
             return "sleepy"
         if any(w in text for w in ["哦", "原来", "这样啊", "明白"]):
             return "thinking"
-        # Check punctuation ratio for excitement
         excl = text.count("！")
         if excl >= 2:
             return "excited"
-        # Random fallback — add variety when no strong signal
-        return random.choice(["thinking", "happy", "focused", "calm", "soothing"])
+        return ""
 
 
 # ── Memory IO ────────────────────────────────────────────────────
@@ -231,40 +218,6 @@ def _save_short_term(messages: list[dict]) -> None:
             json.dump(messages, f, ensure_ascii=False, indent=2)
 
 
-def _load(path: str, default):
-    if os.path.exists(path):
-        with _memory_lock:
-            with open(path) as f:
-                return json.load(f)
-    return default
-
-
-def _save(path: str, data) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with _memory_lock:
-        with open(path, "w") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def _load_facts() -> list:
-    data = _load(FACTS_FILE, [])
-    return data if isinstance(data, list) else []
-
-
-def _load_episodes() -> list:
-    data = _load(EPISODES_FILE, [])
-    return data if isinstance(data, list) else []
-
-
-def _load_state() -> dict:
-    state = _load(STATE_FILE, {})
-    if not isinstance(state, dict):
-        return {}
-    if state.get("mood") and state["mood"] not in ALLOWED_MOODS:
-        state = {k: v for k, v in state.items() if k != "mood"}
-    return state
-
-
 def _load_text(path: str) -> str:
     if not os.path.exists(path):
         return ""
@@ -278,29 +231,6 @@ def _load_runtime_soul() -> str:
     soul_md = os.path.join(config_dir, "soul.md")
     soul_txt = os.path.join(config_dir, "soul.txt")
     return _load_text(soul_md) or _load_text(soul_txt) or SOUL
-
-
-def _write_memory_md() -> None:
-    facts = _load_facts()
-    episodes = _load_episodes()
-    state = _load_state()
-
-    lines = ["# 小灵记忆", ""]
-    if state.get("mood"):
-        lines.extend(["## 最近互动基调", state["mood"], ""])
-    if facts:
-        lines.append("## 关于用户的长期事实")
-        lines.extend(f"- {fact}" for fact in facts)
-        lines.append("")
-    if episodes:
-        lines.append("## 重要互动片段")
-        lines.extend(f"- {episode}" for episode in episodes)
-        lines.append("")
-
-    os.makedirs(os.path.dirname(MEMORY_MD_FILE), exist_ok=True)
-    with _memory_lock:
-        with open(MEMORY_MD_FILE, "w") as f:
-            f.write("\n".join(lines).strip() + "\n")
 
 
 # ── Memory Compression ───────────────────────────────────────────
@@ -340,7 +270,7 @@ def _compress_turns(turns: list[dict]) -> None:
         if not candidates_raw:
             return
 
-        # Write to candidates instead of directly to facts/episodes
+        # Write only candidates — no legacy facts/episodes, no memory.md auto-refresh
         for c in candidates_raw:
             mem.add_candidate(
                 type_=c.get("type", "fact"),
@@ -350,34 +280,6 @@ def _compress_turns(turns: list[dict]) -> None:
                 mood=c.get("mood", ""),
                 source_turn_ids=[str(time.time())],  # approximate turn id
             )
-
-        # Also keep legacy facts/episodes updated for backward compat
-        legacy_facts = [c["content"] for c in candidates_raw
-                        if c.get("type") in ("fact", "preference", "project", "correction")]
-        if legacy_facts:
-            facts = _load_facts()
-            seen = {str(item).strip() for item in facts}
-            for fact in legacy_facts:
-                f = fact.strip()
-                if f and f not in seen:
-                    facts.insert(0, f)
-                    seen.add(f)
-            _save(FACTS_FILE, facts[:MAX_FACTS])
-
-        legacy_episodes = [c["content"] for c in candidates_raw if c.get("type") == "episode"]
-        if legacy_episodes:
-            episodes = _load_episodes()
-            seen = {str(item).strip() for item in episodes}
-            for ep in legacy_episodes:
-                e = ep.strip()
-                if e and e not in seen:
-                    episodes.insert(0, e)
-                    seen.add(e)
-            _save(EPISODES_FILE, episodes[:MAX_EPISODES])
-
-        # Update memory.md from new memory system
-        mem.refresh_memory_md()
-        _write_memory_md()
 
 
 def _compress_turns_background(turns: list[dict]) -> None:

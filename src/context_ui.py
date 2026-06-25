@@ -28,7 +28,6 @@ JSON_FILES = {
     "episodes": MEMORY_DIR / "episodes.json",
     "state": MEMORY_DIR / "state.json",
     "memory_candidates": MEMORY_DIR / "memory_candidates.json",
-    "memory_stream": MEMORY_DIR / "memory_stream.jsonl",
     "working_memory": MEMORY_DIR / "working_memory.json",
 }
 
@@ -76,13 +75,6 @@ def _runtime_soul() -> str:
     return _read_text(TEXT_FILES["soul"]).strip() or _read_text(CONFIG_DIR / "soul.txt").strip()
 
 
-def _state() -> dict:
-    state = _read_json(JSON_FILES["state"], {})
-    if state.get("mood") and state["mood"] not in MOODS:
-        return {k: v for k, v in state.items() if k != "mood"}
-    return state
-
-
 def _write_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -97,29 +89,6 @@ def _normalize_json_for(key: str, data):
     if isinstance(default, list):
         return data if isinstance(data, list) else default
     return data if isinstance(data, dict) else default
-
-
-def build_memory_markdown() -> str:
-    facts = _read_json(JSON_FILES["facts"], [])
-    episodes = _read_json(JSON_FILES["episodes"], [])
-    state = _state()
-
-    lines = ["# 小灵记忆", ""]
-    if state.get("mood"):
-        lines.extend(["## 最近互动基调", str(state["mood"]), ""])
-    if facts:
-        lines.append("## 关于用户的长期事实")
-        lines.extend(f"- {fact}" for fact in facts)
-        lines.append("")
-    if episodes:
-        lines.append("## 重要互动片段")
-        lines.extend(f"- {episode}" for episode in episodes)
-        lines.append("")
-    return "\n".join(lines).strip() + "\n"
-
-
-def refresh_memory_markdown() -> None:
-    _write_text(TEXT_FILES["memory"], build_memory_markdown())
 
 
 def assemble_context() -> list[dict[str, str]]:
@@ -168,7 +137,7 @@ def assemble_context() -> list[dict[str, str]]:
 
 def snapshot() -> dict:
     text = {key: _read_text(path) for key, path in TEXT_FILES.items()}
-    data = {key: _read_json(path, [] if key in {"conversation", "facts", "episodes", "memory_candidates", "memory_stream"} else {}) for key, path in JSON_FILES.items()}
+    data = {key: _read_json(path, [] if key in {"conversation", "facts", "episodes", "memory_candidates"} else {}) for key, path in JSON_FILES.items()}
     context = assemble_context()
     return {
         "text": text,
@@ -227,7 +196,6 @@ INDEX_HTML = r"""<!doctype html>
   <header>
     <h1>小灵 Context Console</h1>
     <div>
-      <button onclick="refreshMemory()" title="从 facts/episodes 生成 memory.md">刷新 memory.md</button>
       <button onclick="refreshMemoryStream()" title="从记忆流+反思+工作状态生成 memory.md">刷新记忆流</button>
       <button onclick="refreshReflection()" title="根据记忆流和最近对话重新生成反思">刷新反思</button>
       <button onclick="approveAll()" title="批准所有待审批候选">全部批准</button>
@@ -345,18 +313,6 @@ async function saveCurrent() {
   } catch (err) {
     setStatus('保存失败：' + err.message, true);
   }
-}
-
-async function refreshMemory() {
-  data = await api('/api/refresh-memory', {method:'POST'});
-  current = 'text:memory';
-  renderNav();
-  renderEditor();
-  renderStats();
-  renderMemStats();
-  renderCandidates();
-  renderContext();
-  setStatus('已从 facts/episodes 重新生成 memory.md');
 }
 
 function renderStats() {
@@ -533,9 +489,6 @@ class ContextHandler(BaseHTTPRequestHandler):
                     self._send_json({"error": "invalid target"}, 400)
                     return
                 self._send_json(snapshot())
-            elif path == "/api/refresh-memory":
-                refresh_memory_markdown()
-                self._send_json(snapshot())
             elif path == "/api/refresh-memory-stream":
                 mem.refresh_memory_md()
                 self._send_json(snapshot())
@@ -550,6 +503,7 @@ class ContextHandler(BaseHTTPRequestHandler):
                     self._send_json({"error": "missing candidate_id"}, 400)
                     return
                 mem.approve_candidate(cid)
+                mem.refresh_memory_md()
                 self._send_json(snapshot())
             elif path == "/api/reject-candidate":
                 body = self._read_body()
@@ -562,6 +516,7 @@ class ContextHandler(BaseHTTPRequestHandler):
             elif path == "/api/approve-all":
                 for c in mem.load_candidates("pending"):
                     mem.approve_candidate(c["id"])
+                mem.refresh_memory_md()
                 self._send_json(snapshot())
             elif path == "/api/memory-stats":
                 self._send_json(mem.get_stats())

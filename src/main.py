@@ -31,9 +31,9 @@ def _is_vision_request(text: str) -> bool:
 
 
 def _stream_chat_to_tts(text: str):
-    """Accumulate LLM tokens, split at sentence boundaries,
-    clean mood tags, and feed sentences to streaming TTS."""
-    _face.set_state("thinking", mood="thinking")
+    """Accumulate LLM tokens, extract first-line JSON mood,
+    stream TTS, save clean text to memory."""
+    _face.set_state("thinking")
     sys.stdout.write("\n💬 小灵: ")
     sys.stdout.flush()
 
@@ -42,10 +42,7 @@ def _stream_chat_to_tts(text: str):
     header_buffer = ""
     header_done = False
     mood_seen = False
-    tts_buffer = ""   # accumulates sentences before sending to TTS
-
-    # Set face to thinking initially
-    _face.set_state("thinking")
+    tts_buffer = ""
 
     for token in chat_stream(text):
         full_reply += token
@@ -65,15 +62,14 @@ def _stream_chat_to_tts(text: str):
                         sys.stdout.write(rest.lstrip())
                         sys.stdout.flush()
                 except json.JSONDecodeError:
-                    clean = _mood.parse_llm_output(header_buffer)
-                    buffer += clean
-                    sys.stdout.write(clean)
+                    print(f"\n⚠️  首行非 JSON: {first_line[:50]}")
+                    buffer += header_buffer
+                    sys.stdout.write(header_buffer)
                     sys.stdout.flush()
                 header_done = True
             elif len(header_buffer) > 120:
-                clean = _mood.parse_llm_output(header_buffer)
-                buffer += clean
-                sys.stdout.write(clean)
+                buffer += header_buffer
+                sys.stdout.write(header_buffer)
                 sys.stdout.flush()
                 header_done = True
             continue
@@ -82,14 +78,13 @@ def _stream_chat_to_tts(text: str):
         sys.stdout.flush()
         buffer += token
 
-        # Check for sentence boundary
+        # Sentence splitting for streaming TTS
         parts = _SENTENCE_SPLIT.split(buffer)
         if len(parts) >= 3:
             sentence = parts[0] + parts[1]
             remaining = "".join(parts[2:])
             clean = _mood.parse_llm_output(sentence)
             if clean.strip():
-                # Buffer until we have enough text (2+ sentences or 40+ chars)
                 tts_buffer += clean
                 if tts_buffer.count("。") + tts_buffer.count("！") + tts_buffer.count("？") >= 2 or len(tts_buffer) >= 40:
                     _face.set_state("speaking")
@@ -99,12 +94,10 @@ def _stream_chat_to_tts(text: str):
 
     # Flush remaining buffer
     if not header_done and header_buffer.strip():
-        clean = _mood.parse_llm_output(header_buffer)
-        buffer += clean
-        sys.stdout.write(clean)
+        buffer += header_buffer
+        sys.stdout.write(header_buffer)
         sys.stdout.flush()
 
-    # Flush accumulated TTS buffer
     if tts_buffer.strip():
         _face.set_state("speaking")
         say_stream(tts_buffer)
@@ -118,19 +111,17 @@ def _stream_chat_to_tts(text: str):
 
     print()
 
-    # Save full turn (without mood tags) to memory
+    # Save clean text (JSON header stripped) to memory
     clean_reply = _mood.parse_llm_output(full_reply)
     save_memory(text, clean_reply)
 
-    # Fallback: infer mood from content if no mood tag was found
+    # Fallback: infer mood only when LLM gave no valid JSON at all
     if not mood_seen:
-        # First try user's input tone
         hint = _mood.hint_from_user(text)
         if hint:
             _mood.apply_mood(hint)
-            print(f"🎭 表情: {hint}（关键词推断）")
+            print(f"🎭 表情: {hint}（用户关键词推断）")
         else:
-            # Then try LLM reply content
             hint = _mood.hint_from_reply(clean_reply)
             if hint:
                 _mood.apply_mood(hint)
@@ -156,7 +147,7 @@ def _handle_vision(text: str):
     description = describe(image_b64, vision_query)
     print(f"   画面: {description[:80]}...")
 
-    _face.set_state("thinking", mood="thinking")
+    _face.set_state("thinking")
     reply = chat_with_vision(text, description)
     clean = _mood.parse_llm_output(reply)
     print(f"💬 小灵: {clean}")

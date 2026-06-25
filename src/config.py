@@ -9,12 +9,15 @@ _MEMORY_DIR = os.path.join(_BASE, "..", "data", "memory")
 
 # ── DeepSeek API Key ─────────────────────────────────────────────
 def _load_deepseek_key() -> str:
-    env_key = os.getenv("DEEPSEEK_API_KEY")
-    if env_key:
-        return env_key
-    raise RuntimeError("DeepSeek API Key not found. Set DEEPSEEK_API_KEY env var")
+    return os.getenv("DEEPSEEK_API_KEY", "")
 
 DEEPSEEK_API_KEY = _load_deepseek_key()
+
+def require_deepseek_key() -> str:
+    """Raise if key is not set. Call at API usage site, not at import time."""
+    if not DEEPSEEK_API_KEY:
+        raise RuntimeError("DeepSeek API Key not found. Set DEEPSEEK_API_KEY env var")
+    return DEEPSEEK_API_KEY
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
 # ── Settings (editable via data/config/settings.json) ────────────

@@ -93,10 +93,8 @@ class Face:
         self._canvas_w = self._c.winfo_width() or 800
         self._canvas_h = self._c.winfo_height() or 600
 
-    def set_state(self, state: str, mood: str = None):
+    def set_state(self, state: str):
         self.state = state
-        if mood and mood in MOODS:
-            self._set_mood(mood)
 
     def set_mood(self, mood: str):
         if mood in MOODS and mood != self._mood:
