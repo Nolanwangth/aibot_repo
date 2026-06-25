@@ -61,7 +61,7 @@ class Face:
 
         self._fading = False
         self._fade_frame = 0
-        self._from_grid = None
+        self._from_layer = None
         self._to_mood = "calm"
 
         self._anim_t = 0.0
@@ -97,12 +97,17 @@ class Face:
         self.state = state
 
     def set_mood(self, mood: str):
-        if mood in MOODS and mood != self._mood:
+        """Schedule mood change on the tkinter main thread (thread-safe)."""
+        if mood in MOODS and self._root:
+            self._root.after(0, self._set_mood_if_changed, mood)
+
+    def _set_mood_if_changed(self, mood: str):
+        """Run on main thread — safe to read/write _mood, _fading, etc."""
+        if mood != self._target_mood:
             self._set_mood(mood)
 
     def _set_mood(self, mood: str):
-        if not self._fading:
-            self._from_grid = render_frame(self._mood, self._anim_t)
+        self._from_layer = self._expression_layer()
         self._to_mood = mood
         self._target_mood = mood
         self._fading = True
@@ -145,15 +150,18 @@ class Face:
                 alive.append(p)
         self._particles = alive
 
+    def _raw_expression_layer(self, mood: str, alpha_mul: float = 1.0) -> Image.Image:
+        return _grid_to_layer(render_frame(mood, self._anim_t), alpha_mul)
+
     def _expression_layer(self) -> Image.Image:
-        if self._fading and self._from_grid:
+        if self._fading and self._from_layer:
             frac = _ease(self._fade_frame / FADE_FRAMES)
-            from_layer = _grid_to_layer(self._from_grid, 1.0 - frac)
-            to_grid = render_frame(self._to_mood, self._anim_t)
-            to_layer = _grid_to_layer(to_grid, frac)
+            from_layer = self._from_layer.copy()
+            from_layer.putalpha(from_layer.getchannel("A").point(lambda a: int(a * (1.0 - frac))))
+            to_layer = self._raw_expression_layer(self._to_mood, frac)
             return Image.alpha_composite(from_layer, to_layer)
 
-        return _grid_to_layer(render_frame(self._mood, self._anim_t))
+        return self._raw_expression_layer(self._mood)
 
     def _render_mask(self) -> Image.Image:
         expression = self._expression_layer()

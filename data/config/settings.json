@@ -1,5 +1,8 @@
 {
   "model": "deepseek-v4-pro",
   "compress_model": "deepseek-v4-flash",
-  "tts_voice": "zh-CN-XiaoxiaoNeural"
+  "tts_voice": "zh-CN-XiaoxiaoNeural",
+  "speech_output_enabled": true,
+  "proactive_enabled": true,
+  "proactive_idle_seconds": 60
 }

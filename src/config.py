@@ -33,8 +33,11 @@ _settings = _load_settings()
 DEEPSEEK_MODEL = _settings.get("model", "deepseek-chat")
 DEEPSEEK_COMPRESS_MODEL = _settings.get("compress_model", "deepseek-v4-flash")
 TTS_VOICE = _settings.get("tts_voice", "zh-CN-XiaoxiaoNeural")
+SPEECH_OUTPUT_ENABLED = bool(_settings.get("speech_output_enabled", True))
+PROACTIVE_ENABLED = bool(_settings.get("proactive_enabled", True))
+PROACTIVE_IDLE_SECONDS = max(10, int(_settings.get("proactive_idle_seconds", 60)))
 
-# ── Soul (editable via data/config/soul.txt) ─────────────────────
+# ── Soul (editable via data/config/soul.md) ──────────────────────
 _DEFAULT_SOUL = """你是「小灵」，一个住在电脑里的智能助手。你细心、体贴、会关心人的感受。
 
 性格特点：

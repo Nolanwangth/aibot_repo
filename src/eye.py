@@ -2,6 +2,7 @@
 import base64
 import os
 import subprocess
+import time
 import cv2
 import requests
 AGNES_VISION_URL = "https://apihub.agnes-ai.com/v1/chat/completions"
@@ -73,7 +74,7 @@ def describe(image_b64: str, query: str) -> str:
         }],
     }
 
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             resp = requests.post(
                 AGNES_VISION_URL,
@@ -82,15 +83,18 @@ def describe(image_b64: str, query: str) -> str:
                 timeout=60,
             )
             if resp.status_code != 200:
+                if resp.status_code >= 500 and attempt < 2:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
                 raise RuntimeError(f"Agnes Vision error ({resp.status_code}): {resp.text[:200]}")
             data = resp.json()
             if "error" in data:
                 raise RuntimeError(f"Agnes error: {data['error']}")
             return data["choices"][0]["message"]["content"]
         except requests.exceptions.Timeout:
-            if attempt == 0:
+            if attempt < 2:
                 continue
-        raise RuntimeError("Agnes 视觉请求超时，请重试")
+            raise RuntimeError("Agnes 视觉请求超时，请重试")
 
     raise RuntimeError("Agnes 视觉请求超时")  # unreachable, satisfies type checker
 
